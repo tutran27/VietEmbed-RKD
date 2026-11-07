@@ -1,0 +1,10 @@
+# Các thư viện phục vụ Vietnamese Relational KD
+torch>=2.0.0
+transformers>=4.40.0
+sentence-transformers>=3.0.0
+peft>=0.10.0
+datasets>=2.19.0
+accelerate>=0.28.0
+numpy>=1.24.0
+tqdm>=4.66.0
+mteb>=1.12.0

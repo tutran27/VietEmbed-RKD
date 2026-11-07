@@ -1,0 +1,16 @@
+# Cấu hình Thí nghiệm E2: Relational Knowledge Distillation (InfoNCE + Gram RKD)
+experiment_id: "E2_Relational_KD"
+model_student: "Qwen/Qwen3-Embedding-0.6B"
+model_teacher: "Qwen/Qwen3-Embedding-4B"
+data_path: "data/groups_scored.jsonl"
+output_dir: "outputs/E2_RKD"
+
+# Siêu tham số huấn luyện
+lambda_rel: 0.5          # Trọng số của Relational KD Loss
+batch_groups: 4          # 4 queries mỗi microbatch (tổng 16 documents)
+accum: 8                 # Gradient accumulation (effective batch size = 32 groups)
+epochs: 1
+lr: 0.0001
+temperature: 0.05        # Nhiệt độ tau cho InfoNCE
+max_seq_length: 512
+seed: 42

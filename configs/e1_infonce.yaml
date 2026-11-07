@@ -1,0 +1,15 @@
+# Cấu hình Thí nghiệm E1: Supervised Contrastive (InfoNCE) Baseline
+experiment_id: "E1_InfoNCE"
+model_student: "Qwen/Qwen3-Embedding-0.6B"
+data_path: "data/groups_scored.jsonl"
+output_dir: "outputs/E1_InfoNCE"
+
+# Siêu tham số huấn luyện
+lambda_rel: 0.0          # Không dùng RKD, chỉ train InfoNCE
+batch_groups: 4          # 4 queries mỗi microbatch (tổng 16 documents)
+accum: 8                 # Gradient accumulation (effective batch size = 32 groups)
+epochs: 1
+lr: 0.0001
+temperature: 0.05        # Nhiệt độ tau cho InfoNCE
+max_seq_length: 512
+seed: 42

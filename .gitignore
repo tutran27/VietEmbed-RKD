@@ -1,1 +1,16 @@
-Vietnamese_Relational_KD_Qwen3_4B_to_0.6B_Technical_Plan.md
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+
+# Data & Checkpoints
+data/*.jsonl
+outputs/
+results/
+*.pt
+*.safetensors
+*.bin
+
+# Internal docs
+*Technical_Plan.md
