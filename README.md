@@ -7,19 +7,54 @@ Dự án chưng cất tri thức dạng quan hệ (**Similarity / Gram Matrix Re
 ## 1. Giới thiệu bài toán & Công thức cốt lõi
 
 ### Vì sao dùng Relational KD thay vì ép tọa độ MSE?
-- **Khác biệt số chiều vector:** Teacher (2560D) và Student (1024D). Không ép bằng nhau theo từng tọa độ mà ép **ma trận Gram góc tương quan cosine ($4 \times 4$)** giữa các văn bản trong nhóm $K=4$ ($1$ positive + $3$ negatives).
-- **Teacher Offline Caching:** Chạy Teacher inference 1 lần để sinh ma trận Gram, lưu vào file rồi giải phóng hoàn toàn VRAM trước khi train Student.
+- **Khác biệt số chiều vector:** Teacher (2560D) và Student (1024D). Không thể ép trực tiếp tọa độ (MSE feature) mà không dùng thêm ma trận chiếu (projection layer). Thay vào đó, Relational KD bảo toàn **cấu trúc hình học tương quan cosine** giữa các văn bản.
+- **Ma trận Gram góc tương quan:** Với mỗi nhóm gồm $K = 4$ văn bản (1 positive + 3 negatives), ma trận embedding sau khi chuẩn hóa $L_2$ là $Z \in \mathbb{R}^{K \times D}$. Ma trận Gram tương quan cosine $G \in \mathbb{R}^{K \times K}$ được tính bởi:
 
-### Hàm Loss tổng quát:
-$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{NCE}} + \lambda_{\text{rel}} \cdot \mathcal{L}_{\text{RKD}}$$
+$$
+G = Z Z^\top \in \mathbb{R}^{K \times K}, \quad \text{với } G_{jk} = \cos(z_j, z_k) = z_j \cdot z_k
+$$
 
-1. **InfoNCE Loss ($\mathcal{L}_{\text{NCE}}$):** Phân loại tài liệu đúng (index 0) so với các negative candidate với nhiệt độ $\tau = 0.05$:
-   $$\mathcal{L}_{\text{NCE}} = -\frac{1}{B} \sum_{i=1}^B \log \frac{\exp(s_{i0} / \tau)}{\sum_{j=0}^3 \exp(s_{ij} / \tau)}$$
-2. **Relational KD Loss ($\mathcal{L}_{\text{RKD}}$):** Đo sai số bình phương trung bình (MSE) giữa Student Gram và Teacher Gram trên **6 cặp quan hệ tam giác trên** (loại bỏ đường chéo $= 1$):
-   $$\mathcal{L}_{\text{RKD}} = \frac{1}{6} \sum_{0 \le j < k < 4} \left( G_{T, jk} - G_{S, jk} \right)^2$$
-3. **Hai nhánh thí nghiệm:**
-   - **`E1` (Baseline):** Đặt $\lambda_{\text{rel}} = 0.0$ (chỉ train InfoNCE giám sát).
-   - **`E2` (Relational KD):** Đặt $\lambda_{\text{rel}} = 0.5$ (kết hợp InfoNCE + cấu trúc hình học của Teacher).
+- **Teacher Offline Caching:** Chạy Teacher inference 1 lần để sinh ma trận Gram $G_T$, lưu vào file rồi giải phóng hoàn toàn VRAM trước khi huấn luyện Student.
+
+---
+
+### Hàm Loss tổng quát
+
+$$
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{NCE}} + \lambda_{\text{rel}} \cdot \mathcal{L}_{\text{RKD}}
+$$
+
+### Chi tiết các thành phần Loss
+
+#### 1. InfoNCE Loss ($\mathcal{L}_{\text{NCE}}$)
+Phân loại tài liệu đúng (positive tại index $0$) so với các negative candidates trong cùng nhóm với nhiệt độ $\tau = 0.05$:
+
+$$
+\mathcal{L}_{\text{NCE}} = -\frac{1}{B} \sum_{i=1}^B \log \frac{\exp(s_{i0} / \tau)}{\sum_{j=0}^{K-1} \exp(s_{ij} / \tau)}
+$$
+
+Trong đó:
+- $B$: Kích thước batch (số nhóm query - documents).
+- $K = 4$: Số lượng tài liệu trong mỗi nhóm ($1$ positive + $3$ negatives).
+- $s_{ij} = \cos(f_S(q_i), f_S(d_{ij}))$: Điểm tương đồng cosine giữa query $q_i$ và document $d_{ij}$ tạo bởi mô hình Student.
+- $\tau = 0.05$: Hệ số nhiệt độ (temperature).
+
+#### 2. Relational KD Loss ($\mathcal{L}_{\text{RKD}}$)
+Đo sai số bình phương trung bình (MSE) giữa ma trận Gram của Student ($G_S$) và Teacher ($G_T$) trên **6 cặp quan hệ tam giác trên** (loại bỏ đường chéo chính $j = k$ vì luôn bằng $1$ do đã chuẩn hóa $L_2$):
+
+$$
+\mathcal{L}_{\text{RKD}} = \frac{1}{6B} \sum_{i=1}^B \sum_{0 \le j < k < 4} \left( G_{T, jk}^{(i)} - G_{S, jk}^{(i)} \right)^2
+$$
+
+Tổng quát cho nhóm $K$ văn bản với $M = \frac{K(K - 1)}{2}$ cặp quan hệ:
+
+$$
+\mathcal{L}_{\text{RKD}} = \frac{2}{B K (K - 1)} \sum_{i=1}^B \sum_{0 \le j < k < K} \left( G_{T, jk}^{(i)} - G_{S, jk}^{(i)} \right)^2
+$$
+
+#### 3. Hai nhánh thí nghiệm
+- **`E1` (Baseline):** Đặt $\lambda_{\text{rel}} = 0.0$ (chỉ huấn luyện InfoNCE giám sát).
+- **`E2` (Relational KD):** Đặt $\lambda_{\text{rel}} = 0.5$ (kết hợp InfoNCE + cấu trúc hình học của Teacher).
 
 ---
 
