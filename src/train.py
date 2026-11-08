@@ -11,20 +11,8 @@ import os
 import random
 import sys
 
-# Thiết lập encoding UTF-8 an toàn cho console Windows
-if sys.stdout.encoding.lower() != "utf-8":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-
-# Tương thích giữa torch và transformers nếu thiếu AuxRequest
-try:
-    import torch.nn.attention.flex_attention as _fa
-    if not hasattr(_fa, "AuxRequest"):
-        _fa.AuxRequest = object
-except Exception:
-    pass
+# Đảm bảo Python nhận diện được package src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import numpy as np
 import torch
@@ -32,15 +20,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from sentence_transformers import SentenceTransformer
 
-
-# Template truy vấn chuẩn theo Qwen3-Embedding
-QWEN_TASK_PROMPT = "Given a web search query, retrieve relevant passages that answer the query"
-
-
-def format_query(query_text: str) -> str:
-    """Format query theo chuẩn của Qwen3-Embedding."""
-    return f"Instruct: {QWEN_TASK_PROMPT}\nQuery: {query_text}"
-
+from src import compat 
 
 class GroupedRetrievalDataset(Dataset):
     """
@@ -141,24 +121,29 @@ def train():
     print(f"    Thí nghiệm: {'E1 (InfoNCE Baseline)' if args.lambda_rel == 0.0 else f'E2 (Relational KD, lambda={args.lambda_rel})'}")
 
     # Khởi tạo Student model
-    model_kwargs = {}
-    if device == "cuda":
-        torch.backends.cuda.matmul.allow_tf32 = True
-        is_bf16_supported = torch.cuda.is_bf16_supported()
-        model_kwargs["torch_dtype"] = torch.bfloat16 if is_bf16_supported else torch.float16
-
+    model_kwargs, tok_kwargs = get_model_kwargs(device, is_qwen="qwen" in args.model.lower())
     print(f"--> Khởi tạo Student Model: {args.model}")
     model = SentenceTransformer(
         args.model,
         device=device,
         model_kwargs=model_kwargs,
-        tokenizer_kwargs={"padding_side": "left"} if "qwen" in args.model.lower() else {}
+        tokenizer_kwargs=tok_kwargs,
     )
     model.max_seq_length = args.max_length
 
     # Áp dụng LoRA
     if not args.no_lora:
         setup_lora_if_available(model)
+
+    # Kích hoạt Gradient Checkpointing để tiết kiệm VRAM
+    base_model = model[0].auto_model
+    if hasattr(base_model, "gradient_checkpointing_enable"):
+        base_model.gradient_checkpointing_enable()
+        print("--> Đã kích hoạt Gradient Checkpointing.")
+    if hasattr(base_model, "enable_input_require_grads"):
+        base_model.enable_input_require_grads()
+    if hasattr(base_model.config, "use_cache"):
+        base_model.config.use_cache = False
 
     model.train()
 
@@ -192,20 +177,22 @@ def train():
     step_counter = 0
     optimizer.zero_grad(set_to_none=True)
 
+    best_loss = float("inf")
+    best_dir = os.path.join(args.output, "best")
+
     for epoch in range(args.epochs):
         epoch_loss = 0.0
         epoch_nce = 0.0
         epoch_rel = 0.0
+        from tqdm import tqdm
+        pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{args.epochs}")
 
-        for step, (texts, teacher_gram_target, B) in enumerate(loader):
+        for step, (texts, teacher_gram_target, B) in enumerate(pbar):
             step_counter += 1
 
-            # 1. Tokenize và forward qua model: texts = [B queries, B*4 documents]
-            features = model.tokenize(texts)
-            features = {k: v.to(device) for k, v in features.items()}
-
-            out = model(features)
-            embeddings = out["sentence_embedding"]
+            # 1. Tokenize chuẩn tắc HuggingFace (không deprecation, không lỗi str)
+            features = model.tokenizer(texts, padding=True, truncation=True, max_length=args.max_length, return_tensors="pt").to(device)
+            embeddings = model(features)["sentence_embedding"]
 
             # L2 normalize embeddings
             embeddings = F.normalize(embeddings.float(), p=2, dim=-1)
@@ -235,11 +222,12 @@ def train():
 
             # Tổng hợp loss
             loss = loss_nce + args.lambda_rel * loss_rel
+            current_loss = loss.item()
 
             # Backward với gradient accumulation
             (loss / args.accum).backward()
 
-            epoch_loss += loss.item()
+            epoch_loss += current_loss
             epoch_nce += loss_nce.item()
             epoch_rel += loss_rel.item()
 
@@ -250,9 +238,18 @@ def train():
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-            if (step + 1) % max(1, len(loader) // 5) == 0 or (step + 1) == len(loader):
-                print(f"Epoch [{epoch+1}/{args.epochs}] Step [{step+1}/{len(loader)}] "
-                      f"- Loss: {loss.item():.4f} (NCE: {loss_nce.item():.4f}, RKD: {loss_rel.item():.4f})")
+            pbar.set_postfix({"loss": f"{current_loss:.4f}", "nce": f"{loss_nce.item():.4f}", "rkd": f"{loss_rel.item():.4f}", "best": f"{best_loss:.4f}" if best_loss != float("inf") else "None"})
+
+            if (step + 1) % 50 == 0 or (step + 1) == len(loader):
+                print(f"Epoch [{epoch+1}/{args.epochs}] Step [{step+1}/{len(loader)}] - Loss: {current_loss:.4f} (NCE: {loss_nce.item():.4f}, RKD: {loss_rel.item():.4f})", flush=True)
+
+            # Lưu checkpoint tốt nhất mỗi 500 steps
+            if (step + 1) % 500 == 0 or (step + 1) == len(loader):
+                if current_loss < best_loss:
+                    best_loss = current_loss
+                    os.makedirs(best_dir, exist_ok=True)
+                    model.save_pretrained(best_dir)
+                    print(f"--> [BEST CHECKPOINT] Đã lưu model tốt nhất (Loss={best_loss:.4f}) tại: {best_dir}", flush=True)
 
     # Lưu checkpoint kết quả
     os.makedirs(args.output, exist_ok=True)

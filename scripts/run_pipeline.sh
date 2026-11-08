@@ -12,12 +12,12 @@ echo "[1/4] Chạy Unit Test kiểm tra tính toán toán học..."
 python tests/test_rkd.py
 
 echo ""
-echo "[2/4] Chuẩn bị dữ liệu mẫu tiếng Việt..."
-python src/prepare_data.py --demo --n 50 --out data/groups.jsonl
+echo "[2/4] Chuẩn bị dữ liệu thật từ Hugging Face (20.000 nhóm mMARCO)..."
+python src/prepare_data.py --n 20000 --out data/groups.jsonl
 
 echo ""
-echo "[3/4] Chạy Teacher Offline (Mock test)..."
-python src/score_teacher.py --input data/groups.jsonl --output data/groups_scored.jsonl --mock
+echo "[3/4] Chạy Teacher Offline tính ma trận Gram..."
+python src/score_teacher.py --input data/groups.jsonl --output data/groups_scored.jsonl --batch-groups 8
 
 echo ""
 echo "[4/4] Pipeline hoàn tất sẵn sàng chạy!"

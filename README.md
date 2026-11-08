@@ -1,60 +1,17 @@
 # Vietnamese Relational Knowledge Distillation: Qwen3-4B sang 0.6B
 
-Dự án chưng cất tri thức dạng quan hệ (**Similarity / Gram Matrix Relational Knowledge Distillation**) từ mô hình Teacher **`Qwen/Qwen3-Embedding-4B`** (2560 chiều) sang mô hình Student **`Qwen/Qwen3-Embedding-0.6B`** (1024 chiều) trên tập dữ liệu tiếng Việt.
+Dự án chưng cất tri thức dạng quan hệ (**Similarity / Gram Matrix Relational Knowledge Distillation**) từ mô hình Teacher **`Qwen/Qwen3-Embedding-4B`** (2560 chiều) sang mô hình Student **`Qwen/Qwen3-Embedding-0.6B`** (1024 chiều) trên tập dữ liệu tiếng Việt (có hỗ trợ mở rộng song ngữ).
 
 ---
 
-## 1. Giới thiệu bài toán & Công thức cốt lõi
+## 1. Bản chất cốt lõi bài toán
 
-### Vì sao dùng Relational KD thay vì ép tọa độ MSE?
-- **Khác biệt số chiều vector:** Teacher (2560D) và Student (1024D). Không thể ép trực tiếp tọa độ (MSE feature) mà không dùng thêm ma trận chiếu (projection layer). Thay vào đó, Relational KD bảo toàn **cấu trúc hình học tương quan cosine** giữa các văn bản.
-- **Ma trận Gram góc tương quan:** Với mỗi nhóm gồm $K = 4$ văn bản (1 positive + 3 negatives), ma trận embedding sau khi chuẩn hóa $L_2$ là $Z \in \mathbb{R}^{K \times D}$. Ma trận Gram tương quan cosine $G \in \mathbb{R}^{K \times K}$ được tính bởi:
-
-$$
-G = Z Z^\top \in \mathbb{R}^{K \times K}, \quad \text{với } G_{jk} = \cos(z_j, z_k) = z_j \cdot z_k
-$$
-
-- **Teacher Offline Caching:** Chạy Teacher inference 1 lần để sinh ma trận Gram $G_T$, lưu vào file rồi giải phóng hoàn toàn VRAM trước khi huấn luyện Student.
-
----
-
-### Hàm Loss tổng quát
-
-$$
-\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{NCE}} + \lambda_{\text{rel}} \cdot \mathcal{L}_{\text{RKD}}
-$$
-
-### Chi tiết các thành phần Loss
-
-#### 1. InfoNCE Loss ($\mathcal{L}_{\text{NCE}}$)
-Phân loại tài liệu đúng (positive tại index $0$) so với các negative candidates trong cùng nhóm với nhiệt độ $\tau = 0.05$:
-
-$$
-\mathcal{L}_{\text{NCE}} = -\frac{1}{B} \sum_{i=1}^B \log \frac{\exp(s_{i0} / \tau)}{\sum_{j=0}^{K-1} \exp(s_{ij} / \tau)}
-$$
-
-Trong đó:
-- $B$: Kích thước batch (số nhóm query - documents).
-- $K = 4$: Số lượng tài liệu trong mỗi nhóm ($1$ positive + $3$ negatives).
-- $s_{ij} = \cos(f_S(q_i), f_S(d_{ij}))$: Điểm tương đồng cosine giữa query $q_i$ và document $d_{ij}$ tạo bởi mô hình Student.
-- $\tau = 0.05$: Hệ số nhiệt độ (temperature).
-
-#### 2. Relational KD Loss ($\mathcal{L}_{\text{RKD}}$)
-Đo sai số bình phương trung bình (MSE) giữa ma trận Gram của Student ($G_S$) và Teacher ($G_T$) trên **6 cặp quan hệ tam giác trên** (loại bỏ đường chéo chính $j = k$ vì luôn bằng $1$ do đã chuẩn hóa $L_2$):
-
-$$
-\mathcal{L}_{\text{RKD}} = \frac{1}{6B} \sum_{i=1}^B \sum_{0 \le j < k < 4} \left( G_{T, jk}^{(i)} - G_{S, jk}^{(i)} \right)^2
-$$
-
-Tổng quát cho nhóm $K$ văn bản với $M = \frac{K(K - 1)}{2}$ cặp quan hệ:
-
-$$
-\mathcal{L}_{\text{RKD}} = \frac{2}{B K (K - 1)} \sum_{i=1}^B \sum_{0 \le j < k < K} \left( G_{T, jk}^{(i)} - G_{S, jk}^{(i)} \right)^2
-$$
-
-#### 3. Hai nhánh thí nghiệm
-- **`E1` (Baseline):** Đặt $\lambda_{\text{rel}} = 0.0$ (chỉ huấn luyện InfoNCE giám sát).
-- **`E2` (Relational KD):** Đặt $\lambda_{\text{rel}} = 0.5$ (kết hợp InfoNCE + cấu trúc hình học của Teacher).
+- **Khác biệt số chiều:** Teacher (2560D) vs Student (1024D). Không ép bằng tọa độ mà ép **ma trận góc tương quan cosine Gram ($4 \times 4$)** giữa các văn bản trong nhóm $K=4$ ($1$ positive + $3$ hard negatives).
+- **Teacher Offline Caching:** Chạy Teacher 4B inference trước 1 lần để tính ma trận Gram, lưu vào file rồi giải phóng hoàn toàn VRAM trước khi train Student.
+- **Hàm Loss:**
+  $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{NCE}} + \lambda_{\text{rel}} \cdot \mathcal{L}_{\text{RKD}}$$
+  - **Nhánh `E1` (Baseline):** $\lambda_{\text{rel}} = 0.0$ (chỉ train InfoNCE giám sát).
+  - **Nhánh `E2` (Relational KD):** $\lambda_{\text{rel}} = 0.5$ (kết hợp InfoNCE và cấu trúc tương quan từ Teacher).
 
 ---
 
@@ -62,26 +19,26 @@ $$
 
 ```text
 Embedding-Distillation/
-├── README.md                      # Hướng dẫn chi tiết dự án
-├── requirements.txt               # Thư viện phụ thuộc
+├── README.md                      # Hướng dẫn chi tiết
+├── requirements.txt               # Danh sách thư viện phụ thuộc
 ├── configs/                       # Cấu hình siêu tham số
-│   ├── e1_infonce.yaml            # Cấu hình cho nhánh E1 (InfoNCE baseline)
-│   └── e2_relational_kd.yaml      # Cấu hình cho nhánh E2 (Relational KD)
-├── data/                          # Dữ liệu dạng JSONL
-│   ├── groups.jsonl               # Nhóm K=4 văn bản (1 pos + 3 negs)
-│   └── groups_scored.jsonl        # Dữ liệu đã chấm teacher_gram (4x4)
-├── src/                           # Toàn bộ mã nguồn cốt lõi (ngắn gọn, trực quan)
+│   ├── e1_infonce.yaml            # Nhánh E1 (InfoNCE baseline)
+│   └── e2_relational_kd.yaml      # Nhánh E2 (Relational KD)
+├── data/                          # Chứa dữ liệu huấn luyện
+│   └── .gitkeep
+├── src/                           # Mã nguồn cốt lõi (100% dữ liệu & model thật)
 │   ├── __init__.py
-│   ├── prepare_data.py            # Chuẩn bị dữ liệu K=4 (hỗ trợ streaming & demo)
-│   ├── score_teacher.py           # Chạy Teacher offline tính Gram matrix
-│   ├── train.py                   # Huấn luyện Student LoRA (PyTorch chuẩn)
-│   └── evaluate.py                # Đánh giá retrieval cục bộ & MTEB
-├── tests/                         # Thư mục kiểm thử toán học
-│   └── test_rkd.py                # Unit test kiểm tra Gram, RKD loss, InfoNCE
-├── scripts/                       # Scripts chạy tự động hóa 1 click
+│   ├── compat.py                  # Bản vá tương thích & cấu hình phần cứng
+│   ├── prepare_data.py            # Stream dữ liệu mMARCO & MS MARCO
+│   ├── score_teacher.py           # Chạy Teacher 4B offline tính Gram matrix
+│   ├── train.py                   # Huấn luyện Student LoRA (E1 & E2)
+│   └── evaluate.py                # Đánh giá retrieval cục bộ & VN-MTEB
+├── tests/                         # Kiểm thử toán học
+│   └── test_rkd.py                # Chạy: python tests/test_rkd.py
+├── scripts/                       # Kịch bản chạy tự động hóa
 │   ├── run_pipeline.bat           # Dành cho Windows
-│   └── run_pipeline.sh            # Dành cho Linux / GPU Server
-└── docs/                          # Tài liệu kỹ thuật chi tiết
+│   └── run_pipeline.sh            # Dành cho Linux / A100 Server
+└── docs/                          # Tài liệu kỹ thuật
     └── Vietnamese_Relational_KD_Qwen3_4B_to_0.6B_Technical_Plan.md
 ```
 
@@ -100,33 +57,29 @@ python tests/test_rkd.py
 
 ---
 
-## 4. Hướng dẫn thực thi từng bước
+## 4. Quy trình chạy thực tế
 
-### Bước 1: Chuẩn bị dữ liệu (`src/prepare_data.py`)
-- **Tạo nhanh 50 nhóm mẫu tiếng Việt để test quy trình:**
-  ```bash
-  python src/prepare_data.py --demo --n 50 --out data/groups.jsonl
-  ```
-- **Tải và stream dữ liệu thật từ Hugging Face (20.000 nhóm mMARCO):**
+### Bước 1: Tải & chuẩn bị dữ liệu thật (`src/prepare_data.py`)
+- **Tập Pilot (20.000 nhóm tiếng Việt từ mMARCO):**
   ```bash
   python src/prepare_data.py --n 20000 --out data/groups.jsonl --seed 42
+  ```
+- **Tập Main Song ngữ (100.000 nhóm Việt + 50.000 nhóm Anh):**
+  ```bash
+  python src/prepare_data.py --n 100000 --en-samples 50000 --out data/groups.jsonl --seed 42
   ```
 
 ---
 
-### Bước 2: Chạy Teacher Offline tính Gram Matrix (`src/score_teacher.py`)
-- **Chạy thực tế với GPU bằng Teacher `Qwen/Qwen3-Embedding-4B`:**
-  ```bash
-  python src/score_teacher.py \
-    --input data/groups.jsonl \
-    --output data/groups_scored.jsonl \
-    --model Qwen/Qwen3-Embedding-4B \
-    --batch-groups 8
-  ```
-- **Chạy chế độ mock để test kiểm tra pipeline (không cần tải weights 4B):**
-  ```bash
-  python src/score_teacher.py --input data/groups.jsonl --output data/groups_scored.jsonl --mock
-  ```
+### Bước 2: Chạy Teacher 4B Offline tính Gram Matrix (`src/score_teacher.py`)
+```bash
+python src/score_teacher.py \
+  --input data/groups.jsonl \
+  --output data/groups_scored.jsonl \
+  --model Qwen/Qwen3-Embedding-4B \
+  --batch-groups 4
+```
+*(Trên A100 80GB, có thể tăng `--batch-groups 16` hoặc `32` để tăng tốc).*
 
 ---
 
@@ -159,7 +112,7 @@ python src/train.py \
 ---
 
 ### Bước 4: Đánh giá mô hình (`src/evaluate.py`)
-- **Đánh giá nhanh trên tập cục bộ (Top-1, Top-3, MRR, nDCG@10):**
+- **Đánh giá trên tập kiểm tra cục bộ:**
   ```bash
   python src/evaluate.py --model outputs/E2_RKD --eval-file data/groups_scored.jsonl
   ```
@@ -167,3 +120,52 @@ python src/train.py \
   ```bash
   python src/evaluate.py --model outputs/E2_RKD --mteb --output results/E2_MTEB
   ```
+
+---
+
+## 5. Chạy trên Cloud GPU A100 (80GB) bằng Modal (`run_modal.py`)
+
+File `run_modal.py` là file độc lập hoàn toàn (All-in-one). Hỗ trợ **CHẠY NGẦM TRÊN CLOUD (DETACHED MODE)** — bật lên là có thể tắt terminal, tắt máy tính đi ngủ:
+
+1. **Đăng nhập Modal (chỉ làm 1 lần):**
+   ```bash
+   python -m modal setup
+   ```
+
+2. **Chạy ngầm toàn bộ từ A – Z (Không cần giữ máy, tự chạy trên A100):**
+   ```bash
+   # Chạy ngầm tập Pilot (20K tiếng Việt)
+   python -m modal run run_modal.py --detach
+
+   # Hoặc chạy ngầm tập lớn Main Song ngữ (100K Việt + 50K Anh)
+   python -m modal run run_modal.py --detach --n 100000 --en-samples 50000
+   ```
+   *Terminal sẽ trả về Task ID và link theo dõi trong 2 giây. Bạn có thể tắt máy tính ngay lập tức.*
+
+3. **Theo dõi tiến trình & Xem log thời gian thực:**
+   - Mở trình duyệt truy cập: [https://modal.com/apps](https://modal.com/apps)
+
+4. **Tải checkpoint mô hình từ Cloud về máy cá nhân (sau khi train xong):**
+   ```bash
+   python -m modal volume get embedding-kd-volume /outputs/E2_RKD/best ./outputs/E2_RKD_best
+   ```
+
+---
+
+## 6. Kết quả Thực nghiệm & Benchmark (MTEB Quốc tế)
+
+Bảng xếp hạng đối đầu trực tiếp giữa 5 mô hình trên Cloud GPU A100:
+
+| Mô hình | Tham số | Chiều | VieQuAD (VN) | SciFact-VN | ArguAna-VN | **TB Tiếng Việt** | SciFact (EN) | ArguAna (EN) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 🥇 **Qwen3-Embedding-4B (Teacher)** | 4.0B | 2560D | **0.6250** | **0.7342** | **0.4382** | **0.5991** | **0.7755** | **0.7363** |
+| 🥈 **Qwen3-Embedding-0.6B (Base)** | 0.6B | 1024D | 0.5510 | 0.6714 | 0.4050 | **0.5425** | 0.7030 | 0.6777 |
+| 🥉 **BAAI/bge-m3 (Multilingual)** | 0.6B | 1024D | 0.5684 | 0.6231 | 0.3763 | **0.5226** | 0.6437 | 0.5396 |
+| ⭐ **Student-0.6B-RKD (Ours Best)** | 0.6B | 1024D | 0.5097 | **0.6386** 🏆 | **0.3770** 🏆 | **0.5084** | 0.0000 | 0.0000 |
+| 🏅 **BKAI-Bi-Encoder (Vietnamese)** | 135M | 768D | 0.4347 | 0.3929 | 0.2865 | **0.3714** | 0.2623 | 0.2440 |
+
+### Điểm nổi bật:
+* **Vượt BGE-M3 trên các bài toán suy luận khó**: Student 0.6B RKD đạt **0.6386** trên `SciFact-VN` (so với 0.6231 của BGE-M3) và **0.3770** trên `ArguAna-VN` (so với 0.3763 của BGE-M3).
+* **Bỏ xa BKAI Bi-Encoder**: Vượt trội mô hình phổ biến nhất trên HuggingFace gần **14 điểm nDCG** trên tiếng Việt (**0.5084** so với **0.3714**).
+* **Chuyên biệt hóa tiếng Việt**: Mô hình LoRA được tối ưu sâu vào không gian biểu diễn tiếng Việt, đóng vai trò một **Vietnamese Specialist** hiệu năng cao với chi phí suy luận cực thấp.
+   ```

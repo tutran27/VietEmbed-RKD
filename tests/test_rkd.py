@@ -4,24 +4,14 @@ Unit tests kiểm tra tính đúng đắn về mặt toán học và định d�
 Chạy độc lập bằng lệnh: python test_rkd.py
 """
 
+import os
 import sys
 import torch
 import torch.nn.functional as F
 
-# Thiết lập encoding UTF-8 an toàn cho console Windows
-if sys.stdout.encoding.lower() != "utf-8":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-
-# Tương thích giữa torch và transformers nếu thiếu AuxRequest
-try:
-    import torch.nn.attention.flex_attention as _fa
-    if not hasattr(_fa, "AuxRequest"):
-        _fa.AuxRequest = object
-except Exception:
-    pass
+# Đảm bảo đường dẫn import từ thư mục gốc
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.compat import format_query, QWEN_TASK_PROMPT
 
 
 
@@ -111,10 +101,10 @@ def test_infonce_loss():
 def test_qwen_prompt_format():
     """Kiểm tra định dạng prompt Qwen3."""
     print("4. Kiểm tra định dạng prompt Qwen3...")
-    task_prompt = "Given a web search query, retrieve relevant passages that answer the query"
     raw_query = "Tìm kiếm quy định pháp luật"
-    formatted = f"Instruct: {task_prompt}\nQuery: {raw_query}"
-    assert formatted == f"Instruct: {task_prompt}\nQuery: Tìm kiếm quy định pháp luật"
+    formatted = format_query(raw_query)
+    expected = f"Instruct: {QWEN_TASK_PROMPT}\nQuery: {raw_query}"
+    assert formatted == expected, f"Sai định dạng prompt: {formatted}"
     print("   -> PASS: Định dạng prompt Qwen3 khớp chuẩn mực.\n")
 
 

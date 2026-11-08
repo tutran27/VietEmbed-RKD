@@ -13,35 +13,14 @@ import math
 import os
 import sys
 
-# Thiết lập encoding UTF-8 an toàn cho console Windows
-if sys.stdout.encoding.lower() != "utf-8":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-
-# Tương thích giữa torch và transformers nếu thiếu AuxRequest
-try:
-    import torch.nn.attention.flex_attention as _fa
-    if not hasattr(_fa, "AuxRequest"):
-        _fa.AuxRequest = object
-except Exception:
-    pass
+# Đảm bảo Python nhận diện được package src
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import numpy as np
 import torch
 from sentence_transformers import SentenceTransformer
 
-
-QWEN_TASK_PROMPT = "Given a web search query, retrieve relevant passages that answer the query"
-
-
-def format_query(query_text: str, is_qwen: bool = True) -> str:
-    """Format query với instruction nếu là model Qwen3-Embedding."""
-    if is_qwen:
-        return f"Instruct: {QWEN_TASK_PROMPT}\nQuery: {query_text}"
-    return query_text
-
+from src.compat import format_query
 
 def compute_dcg_at_k(ranks: list, k: int = 10) -> float:
     """Tính DCG@K với ranks là vị trí của positive (1-based index)."""
@@ -126,10 +105,10 @@ def evaluate_local(model_path: str, data_path: str, batch_size: int = 16, device
     return {"top1": top1_acc, "top3": top3_recall, "mrr": mrr, "ndcg10": ndcg10}
 
 
-def evaluate_mteb(model_path: str, output_dir: str = "results", tasks_subset: list = None):
+def evaluate_mteb(model_path: str, output_dir: str = "results", suite: str = "vietnamese", tasks_subset: list = None):
     """
     Chạy đánh giá chính thức qua MTEB (Massive Text Embedding Benchmark)
-    theo chuẩn VN-MTEB (vie, v1).
+    theo các suite: 'vietnamese', 'english', 'multilingual', hoặc 'all'.
     """
     try:
         import mteb
@@ -137,39 +116,60 @@ def evaluate_mteb(model_path: str, output_dir: str = "results", tasks_subset: li
         print("Lỗi: Chưa cài đặt thư viện mteb. Hãy chạy: pip install mteb")
         return
 
-    print(f"--> Đang khởi tạo MTEB Benchmark cho mô hình: {model_path}...")
-    model = SentenceTransformer(model_path, device="cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\n=======================================================")
+    print(f"--> [MTEB] Khởi tạo Benchmark cho mô hình: {model_path}")
+    print(f"    Suite: {suite.upper()}")
+    print(f"=======================================================")
 
-    try:
-        benchmark = mteb.get_benchmark("VN-MTEB (vie, v1)")
-        if tasks_subset:
-            tasks = [t for t in benchmark.tasks if t.metadata.name in tasks_subset]
-        else:
-            # Mặc định lấy các retrieval tasks
-            tasks = [t for t in benchmark.tasks if getattr(t.metadata, "type", "") == "Retrieval"]
-    except Exception as e:
-        print(f"Không lấy được VN-MTEB qua get_benchmark ({e}), chuyển sang lấy theo task list cụ thể...")
-        # Fallback danh sách task pilot
-        tasks = []
-        for task_name in (tasks_subset or ["SciFact-VN", "ArguAna-VN", "Quora-VN"]):
-            try:
-                tasks.append(mteb.get_task(task_name))
-            except Exception as te:
-                print(f"Không tìm thấy task {task_name}: {te}")
+    is_qwen = "qwen" in model_path.lower()
+    raw_model = SentenceTransformer(model_path, device="cuda" if torch.cuda.is_available() else "cpu")
+    raw_model.eval()
 
-    if not tasks:
-        print("Không có task MTEB nào sẵn sàng để chạy.")
+    # Gắn wrapper prompt trực tiếp vào SentenceTransformer mà không làm mất kiểu class
+    if is_qwen:
+        orig_encode = raw_model.encode
+        def qwen_encode(sentences, prompt_name=None, **kwargs):
+            if prompt_name == "query":
+                if isinstance(sentences, list):
+                    sentences = [format_query(s, is_qwen=True) if not str(s).startswith("Instruct:") else s for s in sentences]
+                elif isinstance(sentences, str) and not str(sentences).startswith("Instruct:"):
+                    sentences = format_query(sentences, is_qwen=True)
+            return orig_encode(sentences, **kwargs)
+        raw_model.encode = qwen_encode
+
+    # Lựa chọn tasks chuẩn tên quốc tế & VN-MTEB
+    if tasks_subset:
+        task_names = tasks_subset
+    elif suite == "vietnamese":
+        task_names = ["VieQuADRetrieval", "SciFact-VN", "ArguAna-VN"]
+    elif suite == "english":
+        task_names = ["SciFact", "NFCorpus", "ArguAna"]
+    elif suite == "multilingual":
+        task_names = ["VieQuADRetrieval", "SciFact-VN", "SciFact", "NFCorpus"]
+    elif suite == "all":
+        task_names = ["VieQuADRetrieval", "SciFact-VN", "ArguAna-VN", "SciFact", "NFCorpus", "ArguAna"]
+    else:
+        task_names = ["VieQuADRetrieval"]
+
+    selected_tasks = []
+    for t_name in task_names:
+        try:
+            selected_tasks.append(mteb.get_task(t_name))
+        except Exception as e:
+            print(f"[CẢNH BÁO] Không tải được task '{t_name}': {e}")
+
+    if not selected_tasks:
+        print("[LỖI] Không có task MTEB nào sẵn sàng để chạy.")
         return
 
-    print(f"--> Bắt đầu đánh giá trên {len(tasks)} tasks...")
-    os.makedirs(output_dir, exist_ok=True)
-    results = mteb.evaluate(
-        model,
-        tasks=tasks,
-        cache=mteb.ResultCache(cache_path=output_dir),
-    )
-    print(f"--> Đã hoàn tất đánh giá MTEB! Kết quả lưu tại: {output_dir}")
-    return results
+    out_folder = os.path.join(output_dir, f"{model_path.replace('/', '_')}_{suite}")
+    os.makedirs(out_folder, exist_ok=True)
+    print(f"--> Bắt đầu đánh giá trên {len(selected_tasks)} tasks: {[t.metadata.name for t in selected_tasks]}...")
+
+    cache = mteb.ResultCache(cache_path=out_folder)
+    results = mteb.evaluate(raw_model, tasks=selected_tasks, cache=cache)
+    print(f"\n--> [MTEB] Đã hoàn tất đánh giá ({suite.upper()})! Kết quả lưu tại: {out_folder}\n")
+    return out_folder
 
 
 def main():
@@ -177,12 +177,13 @@ def main():
     parser.add_argument("--model", required=True, help="Đường dẫn hoặc tên mô hình cần đánh giá")
     parser.add_argument("--eval-file", default="data/groups_scored.jsonl", help="File dữ liệu kiểm tra cục bộ")
     parser.add_argument("--mteb", action="store_true", help="Chạy đánh giá qua MTEB benchmark")
+    parser.add_argument("--suite", default="vietnamese", choices=["vietnamese", "english", "multilingual", "all", "local"], help="Bộ benchmark cần chạy")
     parser.add_argument("--output", default="results", help="Thư mục lưu kết quả MTEB")
-    parser.add_argument("--tasks", nargs="+", default=None, help="Danh sách task MTEB cần chạy")
+    parser.add_argument("--tasks", nargs="+", default=None, help="Danh sách task MTEB tùy chọn")
     args = parser.parse_args()
 
-    if args.mteb:
-        evaluate_mteb(args.model, output_dir=args.output, tasks_subset=args.tasks)
+    if args.mteb or args.suite in ["vietnamese", "english", "multilingual", "all"]:
+        evaluate_mteb(args.model, output_dir=args.output, suite=args.suite, tasks_subset=args.tasks)
     else:
         evaluate_local(args.model, data_path=args.eval_file)
 

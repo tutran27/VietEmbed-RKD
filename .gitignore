@@ -14,3 +14,8 @@ results/
 
 # Internal docs
 *Technical_Plan.md
+
+# Environment variables / secrets
+.env
+*.env
+
